@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildMonthGrid,
+  buildVisibleEntryWindow,
   createDailyTemplate,
+  expandVisibleEntryWindow,
   formatDateTitle,
   formatDateTitleParts,
   formatMonthLabel,
@@ -86,5 +88,54 @@ describe("worklog date helpers", () => {
 
   it("starts new daily entries without a default markdown template", () => {
     expect(createDailyTemplate("2026-07-02")).toBe("");
+  });
+
+  it("builds an initial window around the selected date anchor", () => {
+    const entries = normalizeEntries(
+      Array.from({ length: 30 }, (_, index) => {
+        const day = String(index + 1).padStart(2, "0");
+        return {
+          date: `2026-06-${day}`,
+          content: `entry ${day}`,
+          exists: true,
+        };
+      }),
+    );
+
+    expect(
+      buildVisibleEntryWindow(entries, "2026-06-20", { initialCount: 6 }),
+    ).toEqual({ start: 7, end: 13, anchorIndex: 10 });
+  });
+
+  it("uses the insertion point when the selected date does not exist yet", () => {
+    const entries = normalizeEntries([
+      { date: "2026-06-25", content: "a", exists: true },
+      { date: "2026-06-23", content: "b", exists: true },
+      { date: "2026-06-20", content: "c", exists: true },
+    ]);
+
+    expect(
+      buildVisibleEntryWindow(entries, "2026-06-24", { initialCount: 4 }),
+    ).toEqual({ start: 0, end: 3, anchorIndex: 1 });
+  });
+
+  it("expands the window upward and downward in fixed chunks", () => {
+    expect(
+      expandVisibleEntryWindow(
+        { start: 10, end: 20, anchorIndex: 15 },
+        "forward",
+        12,
+        40,
+      ),
+    ).toEqual({ start: 0, end: 20, anchorIndex: 15 });
+
+    expect(
+      expandVisibleEntryWindow(
+        { start: 10, end: 20, anchorIndex: 15 },
+        "backward",
+        12,
+        40,
+      ),
+    ).toEqual({ start: 10, end: 32, anchorIndex: 15 });
   });
 });

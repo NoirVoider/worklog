@@ -25,6 +25,12 @@ export type WorklogEntry = WorklogFile & {
   preview: string;
 };
 
+export type EntryWindow = {
+  start: number;
+  end: number;
+  anchorIndex: number;
+};
+
 export type CalendarDay = {
   date: string;
   day: number;
@@ -42,6 +48,10 @@ export type DateTitleParts = {
 
 const DATE_FORMAT = "yyyy-MM-dd";
 const WEEK_START_OFFSET = 1;
+
+type EntryWindowOptions = {
+  initialCount: number;
+};
 
 export function todayIso(): string {
   return format(new Date(), DATE_FORMAT);
@@ -122,6 +132,47 @@ export function normalizeEntries(entries: WorklogFile[]): WorklogEntry[] {
     }));
 }
 
+export function buildVisibleEntryWindow(
+  entries: WorklogEntry[],
+  selectedDate: string,
+  options: EntryWindowOptions,
+): EntryWindow {
+  if (entries.length === 0) {
+    return { start: 0, end: 0, anchorIndex: 0 };
+  }
+
+  const { initialCount } = options;
+  const anchorIndex = findEntryAnchorIndex(entries, selectedDate);
+  const half = Math.floor(initialCount / 2);
+  let start = Math.max(0, anchorIndex - half);
+  let end = Math.min(entries.length, start + initialCount);
+
+  if (end - start < initialCount) {
+    start = Math.max(0, end - initialCount);
+  }
+
+  return { start, end, anchorIndex };
+}
+
+export function expandVisibleEntryWindow(
+  window: EntryWindow,
+  direction: "forward" | "backward",
+  chunkSize: number,
+  totalCount: number,
+): EntryWindow {
+  if (direction === "forward") {
+    return {
+      ...window,
+      start: Math.max(0, window.start - chunkSize),
+    };
+  }
+
+  return {
+    ...window,
+    end: Math.min(totalCount, window.end + chunkSize),
+  };
+}
+
 export function createDailyTemplate(date: string): string {
   void date;
   return "";
@@ -133,7 +184,21 @@ function extractPreview(markdown: string): string {
     .map((item) => item.trim())
     .find((lineText) => lineText && !lineText.startsWith("#"));
 
-  return line ? line.replace(/^[-*]\s+/, "").slice(0, 64) : "尚未记录";
+  return line ? line.replace(/^[-*]\s+/, "").slice(0, 64) : "";
+}
+
+function findEntryAnchorIndex(entries: WorklogEntry[], selectedDate: string): number {
+  const existingIndex = entries.findIndex((entry) => entry.date === selectedDate);
+  if (existingIndex >= 0) {
+    return existingIndex;
+  }
+
+  const insertionIndex = entries.findIndex((entry) => entry.date < selectedDate);
+  if (insertionIndex >= 0) {
+    return insertionIndex;
+  }
+
+  return Math.max(entries.length - 1, 0);
 }
 
 function modulo(value: number, divisor: number): number {

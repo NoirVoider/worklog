@@ -4,10 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tauri::utils::config::Color;
-use tauri::{
-    window::{Effect, EffectState, EffectsBuilder},
-    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 #[cfg(target_os = "macos")]
 use tauri::TitleBarStyle;
@@ -132,6 +129,13 @@ fn save_entry(app: AppHandle, date: String, content: String) -> Result<WorklogFi
 }
 
 #[tauri::command]
+fn delete_entry(app: AppHandle, date: String) -> Result<(), String> {
+    let root = resolve_worklog_root(&app)?;
+    let file_path = entry_path(&root, &date)?;
+    delete_entry_file(&file_path)
+}
+
+#[tauri::command]
 fn open_settings_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("settings") {
         if window.is_visible().map_err(|error| error.to_string())? {
@@ -149,8 +153,7 @@ fn open_settings_window(app: AppHandle) -> Result<(), String> {
             .min_inner_size(600.0, 500.0)
             .resizable(true)
             .decorations(true)
-            .transparent(true)
-            .background_color(Color(0, 0, 0, 0))
+            .background_color(Color(244, 247, 250, 255))
             .visible(false);
 
     #[cfg(target_os = "macos")]
@@ -161,8 +164,7 @@ fn open_settings_window(app: AppHandle) -> Result<(), String> {
     }
 
     let builder = with_release_context_menu_disabled(builder);
-    let window = builder.build().map_err(|error| error.to_string())?;
-    apply_native_material(&window).map_err(|error| error.to_string())?;
+    builder.build().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -223,6 +225,23 @@ fn resolve_worklog_root(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_dir)
 }
 
+fn delete_entry_file(file_path: &Path) -> Result<(), String> {
+    if file_path.exists() {
+      fs::remove_file(file_path).map_err(|error| error.to_string())?;
+    }
+
+    if let Some(parent) = file_path.parent() {
+        match fs::remove_dir(parent) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_iso_date(date: &str) -> Result<(), String> {
     let bytes = date.as_bytes();
     let valid_shape = bytes.len() == 10
@@ -256,20 +275,6 @@ fn daily_template(date: &str) -> String {
     String::new()
 }
 
-fn apply_native_material(window: &WebviewWindow) -> tauri::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        window.set_effects(
-            EffectsBuilder::new()
-                .effect(Effect::Sidebar)
-                .state(EffectState::FollowsWindowActiveState)
-                .build(),
-        )?;
-    }
-
-    Ok(())
-}
-
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -282,9 +287,7 @@ pub fn run() {
             {
                 let builder = WebviewWindowBuilder::from_config(app.handle(), main_window_config)?
                     .visible(false);
-                let window = with_release_context_menu_disabled(builder).build()?;
-
-                apply_native_material(&window)?;
+                with_release_context_menu_disabled(builder).build()?;
             }
 
             Ok(())
@@ -294,6 +297,7 @@ pub fn run() {
             read_entry,
             create_entry,
             save_entry,
+            delete_entry,
             open_settings_window,
             main_window_ready,
             settings_window_ready
@@ -309,5 +313,15 @@ mod tests {
     #[test]
     fn daily_template_is_blank() {
         assert_eq!(daily_template("2026-07-02"), "");
+    }
+
+    #[test]
+    fn delete_entry_file_ignores_missing_file() {
+        let root = std::env::temp_dir().join(format!("worklog-delete-{}", std::process::id()));
+        let file_path = root.join("2026-07-02").join("daily.md");
+
+        let result = delete_entry_file(&file_path);
+
+        assert!(result.is_ok());
     }
 }

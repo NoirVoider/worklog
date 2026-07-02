@@ -7,6 +7,7 @@ type WorklogApi = {
   readEntry: (date: string) => Promise<WorklogFile>;
   saveEntry: (date: string, content: string) => Promise<WorklogFile>;
   createEntry: (date: string) => Promise<WorklogFile>;
+  deleteEntry: (date: string) => Promise<void>;
   openSettings: () => Promise<void>;
   mainWindowReady: () => Promise<void>;
   settingsWindowReady: () => Promise<void>;
@@ -40,11 +41,12 @@ const mockApi: WorklogApi = {
     }));
   },
   async readEntry(date) {
+    const hasEntry = mockEntries.has(date);
     const content = mockEntries.get(date);
     return {
       date,
       content: content ?? createDailyTemplate(date),
-      exists: Boolean(content),
+      exists: hasEntry,
     };
   },
   async saveEntry(date, content) {
@@ -55,6 +57,9 @@ const mockApi: WorklogApi = {
     const content = mockEntries.get(date) ?? createDailyTemplate(date);
     mockEntries.set(date, content);
     return { date, content, exists: true };
+  },
+  async deleteEntry(date) {
+    mockEntries.delete(date);
   },
   async openSettings() {
     window.open("/settings", "worklog-settings", "width=680,height=560,resizable=yes");
@@ -72,6 +77,7 @@ const tauriApi: WorklogApi = {
   readEntry: (date) => invoke<WorklogFile>("read_entry", { date }),
   saveEntry: (date, content) => invoke<WorklogFile>("save_entry", { date, content }),
   createEntry: (date) => invoke<WorklogFile>("create_entry", { date }),
+  deleteEntry: (date) => invoke<void>("delete_entry", { date }),
   openSettings: () => invoke<void>("open_settings_window"),
   mainWindowReady: () => invoke<void>("main_window_ready"),
   settingsWindowReady: () => invoke<void>("settings_window_ready"),

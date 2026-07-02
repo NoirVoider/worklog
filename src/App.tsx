@@ -4,27 +4,30 @@ import {
   ChevronLeft,
   ChevronRight,
   Circle,
+  CircleAlert,
   Eye,
   Fingerprint,
   FolderOpen,
   Info,
+  LoaderCircle,
   Mail,
   PanelLeft,
   PanelLeftClose,
   Pencil,
-  Save,
   Settings,
-  Sparkles,
-  UserRound,
+  UserRound
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { format, parseISO } from "date-fns";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type MouseEvent,
+  type UIEvent
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -35,8 +38,10 @@ import { worklogApi } from "./lib/api";
 import { cn } from "./lib/cn";
 import { isSettingsShortcut, isToggleSidebarShortcut } from "./lib/shortcuts";
 import {
+  buildVisibleEntryWindow,
   buildMonthGrid,
   createDailyTemplate,
+  expandVisibleEntryWindow,
   formatDateTitleParts,
   formatFullDate,
   formatMonthLabel,
@@ -44,19 +49,44 @@ import {
   shiftDate,
   shiftMonth,
   todayIso,
+  type EntryWindow,
   type WorklogEntry,
-  type WorklogFile,
+  type WorklogFile
 } from "./lib/worklog";
 
 const weekLabels = ["一", "二", "三", "四", "五", "六", "日"];
 
 type EditorMode = "edit" | "preview";
 
+const AUTOSAVE_DELAY_MS = 600;
+const INITIAL_ENTRY_WINDOW = 24;
+const ENTRY_WINDOW_CHUNK = 12;
+const ENTRY_SCROLL_THRESHOLD = 120;
+
+type StatusMessage =
+  | "idle"
+  | "loading"
+  | "empty"
+  | "pending"
+  | "saving"
+  | "saved"
+  | "failed"
+  | "creating";
+
+type SpinnerStatusLabel = "Loading entry" | "Creating entry" | "Pending changes" | "Saving";
+
+type StatusIndicator =
+  | { kind: "spinner"; label: SpinnerStatusLabel }
+  | { kind: "warning"; label: "Save failed"; title: "Save failed" }
+  | null;
+
+type FlushReason = "autosave" | "shortcut" | "date-change" | "blur" | "window-close";
+
 const appInfo = {
   name: "Worklog",
   author: "ttb",
   email: "x.ttb@icloud.com",
-  identifier: "com.ttb.worklog",
+  identifier: "com.ttb.worklog"
 };
 
 const dragIgnoreSelector = [
@@ -68,15 +98,32 @@ const dragIgnoreSelector = [
   "[role='button']",
   "[contenteditable='true']",
   ".editor-stage",
-  ".markdown-preview",
+  ".markdown-preview"
 ].join(",");
 
+function getBaseStatus(file: WorklogFile | null): StatusMessage {
+  return file?.exists ? "idle" : "empty";
+}
+
+function getStatusIndicator(status: StatusMessage): StatusIndicator {
+  switch (status) {
+    case "loading":
+      return { kind: "spinner", label: "Loading entry" };
+    case "creating":
+      return { kind: "spinner", label: "Creating entry" };
+    case "pending":
+      return { kind: "spinner", label: "Pending changes" };
+    case "saving":
+      return { kind: "spinner", label: "Saving" };
+    case "failed":
+      return { kind: "warning", label: "Save failed", title: "Save failed" };
+    default:
+      return null;
+  }
+}
+
 function handleWindowDrag(event: MouseEvent<HTMLElement>) {
-  if (
-    event.button !== 0 ||
-    typeof window === "undefined" ||
-    !("__TAURI_INTERNALS__" in window)
-  ) {
+  if (event.button !== 0 || typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
     return;
   }
 
@@ -86,7 +133,9 @@ function handleWindowDrag(event: MouseEvent<HTMLElement>) {
   }
 
   event.preventDefault();
-  void getCurrentWindow().startDragging().catch(() => undefined);
+  void getCurrentWindow()
+    .startDragging()
+    .catch(() => undefined);
 }
 
 export default function App() {
@@ -106,20 +155,66 @@ function WorklogApp() {
   const [mode, setMode] = useState<EditorMode>("edit");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [datePickerOpen, setDatePickerOpen] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-  const [status, setStatus] = useState("就绪");
+  const [status, setStatus] = useState<StatusMessage>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [entryWindow, setEntryWindow] = useState<EntryWindow>({
+    start: 0,
+    end: 0,
+    anchorIndex: 0
+  });
+  const autosaveTimerRef = useRef<number | null>(null);
+  const saveInFlightRef = useRef(false);
+  const queuedFlushRef = useRef(false);
+  const selectedDateRef = useRef(selectedDate);
+  const currentEntryRef = useRef<WorklogFile | null>(currentEntry);
+  const latestContentRef = useRef("");
+  const lastPersistedContentRef = useRef("");
+  const entriesScrollRef = useRef<HTMLDivElement | null>(null);
+  const pendingPrependScrollHeightRef = useRef<number | null>(null);
 
   const normalizedEntries = useMemo(() => normalizeEntries(entries), [entries]);
-  const entryDates = useMemo(() => entries.map((entry) => entry.date), [entries]);
-  const calendarDays = useMemo(
-    () => buildMonthGrid(viewDate, entryDates),
-    [entryDates, viewDate],
-  );
+  const entryDates = useMemo(() => entries.map(entry => entry.date), [entries]);
+  const calendarDays = useMemo(() => buildMonthGrid(viewDate, entryDates), [entryDates, viewDate]);
   const dateTitleParts = useMemo(() => formatDateTitleParts(selectedDate), [selectedDate]);
   const selectedDateValue = useMemo(() => parseISO(selectedDate), [selectedDate]);
-  const selectedEntry = normalizedEntries.find((entry) => entry.date === selectedDate);
-  const hasUnsavedChanges = Boolean(currentEntry && content !== currentEntry.content);
+  const statusIndicator = useMemo(() => getStatusIndicator(status), [status]);
+  const visibleEntries = useMemo(
+    () => normalizedEntries.slice(entryWindow.start, entryWindow.end),
+    [entryWindow.end, entryWindow.start, normalizedEntries]
+  );
+
+  useEffect(() => {
+    selectedDateRef.current = selectedDate;
+  }, [selectedDate]);
+
+  useEffect(() => {
+    currentEntryRef.current = currentEntry;
+  }, [currentEntry]);
+
+  useEffect(() => {
+    latestContentRef.current = content;
+  }, [content]);
+
+  useEffect(() => {
+    pendingPrependScrollHeightRef.current = null;
+    setEntryWindow(
+      buildVisibleEntryWindow(normalizedEntries, selectedDate, {
+        initialCount: INITIAL_ENTRY_WINDOW
+      })
+    );
+  }, [normalizedEntries, selectedDate]);
+
+  useLayoutEffect(() => {
+    const previousHeight = pendingPrependScrollHeightRef.current;
+    const element = entriesScrollRef.current;
+
+    if (previousHeight === null || !element) {
+      return;
+    }
+
+    pendingPrependScrollHeightRef.current = null;
+    element.scrollTop += element.scrollHeight - previousHeight;
+  }, [visibleEntries.length]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
@@ -140,13 +235,118 @@ function WorklogApp() {
     setEntries(files);
   }, []);
 
+  const clearAutosaveTimer = useCallback(() => {
+    if (autosaveTimerRef.current !== null) {
+      window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+  }, []);
+
+  const flushEntry = useCallback(
+    async (reason: FlushReason) => {
+      const snapshotDate = selectedDateRef.current;
+      const snapshotContent = latestContentRef.current;
+      const shouldDeleteOnLeave =
+        (reason === "date-change" || reason === "window-close") &&
+        snapshotContent === "" &&
+        Boolean(currentEntryRef.current?.exists);
+
+      if (latestContentRef.current === lastPersistedContentRef.current && !shouldDeleteOnLeave) {
+        clearAutosaveTimer();
+        setStatus(getBaseStatus(currentEntryRef.current));
+        return true;
+      }
+
+      if (saveInFlightRef.current) {
+        queuedFlushRef.current = true;
+        return true;
+      }
+
+      clearAutosaveTimer();
+
+      if (shouldDeleteOnLeave) {
+        saveInFlightRef.current = true;
+        queuedFlushRef.current = false;
+        setError(null);
+        setStatus("saving");
+
+        try {
+          await worklogApi.deleteEntry(snapshotDate);
+          lastPersistedContentRef.current = createDailyTemplate(snapshotDate);
+
+          if (selectedDateRef.current === snapshotDate) {
+            setCurrentEntry({
+              date: snapshotDate,
+              content: createDailyTemplate(snapshotDate),
+              exists: false
+            });
+          }
+          await refreshEntries();
+        } catch (reason) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+          setStatus("failed");
+          queuedFlushRef.current = false;
+          saveInFlightRef.current = false;
+          return false;
+        }
+
+        queuedFlushRef.current = false;
+        saveInFlightRef.current = false;
+        setStatus("idle");
+        return true;
+      }
+
+      while (latestContentRef.current !== lastPersistedContentRef.current) {
+        const nextSnapshotDate = selectedDateRef.current;
+        const nextSnapshotContent = latestContentRef.current;
+
+        saveInFlightRef.current = true;
+        queuedFlushRef.current = false;
+        setError(null);
+        setStatus("saving");
+
+        try {
+          const saved = await worklogApi.saveEntry(nextSnapshotDate, nextSnapshotContent);
+
+          if (selectedDateRef.current === nextSnapshotDate) {
+            setCurrentEntry(saved);
+          }
+          lastPersistedContentRef.current = saved.content;
+          await refreshEntries();
+        } catch (reason) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+          setStatus("failed");
+          queuedFlushRef.current = false;
+          saveInFlightRef.current = false;
+          return false;
+        }
+
+        const shouldReplay =
+          queuedFlushRef.current || latestContentRef.current !== lastPersistedContentRef.current;
+
+        queuedFlushRef.current = false;
+        saveInFlightRef.current = false;
+
+        if (!shouldReplay) {
+          setStatus("idle");
+          return true;
+        }
+      }
+
+      return true;
+    },
+    [clearAutosaveTimer, refreshEntries]
+  );
+
   const loadEntry = useCallback(async (date: string) => {
     setError(null);
-    setStatus("读取中");
+    setStatus("loading");
     const file = await worklogApi.readEntry(date);
     setCurrentEntry(file);
     setContent(file.content);
-    setStatus(file.exists ? "已读取" : "未创建");
+    latestContentRef.current = file.content;
+    lastPersistedContentRef.current = file.content;
+    setStatus(getBaseStatus(file));
   }, []);
 
   useEffect(() => {
@@ -161,68 +361,110 @@ function WorklogApp() {
     });
   }, [loadEntry, selectedDate]);
 
-  const handleSelectDate = (date: string) => {
-    setSelectedDate(date);
-    setViewDate(date);
-  };
+  useEffect(() => {
+    if (currentEntry && !currentEntry.exists) {
+      setMode("edit");
+    }
+  }, [currentEntry]);
 
-  const handleCreate = async (date = selectedDate) => {
-    setError(null);
-    setStatus("创建中");
-    const file = await worklogApi.createEntry(date);
-    setSelectedDate(date);
-    setViewDate(date);
-    setCurrentEntry(file);
-    setContent(file.content);
-    await refreshEntries();
-    setStatus("已创建");
-  };
+  const handleSelectDate = useCallback(
+    async (date: string) => {
+      if (date === selectedDateRef.current) {
+        setViewDate(date);
+        return true;
+      }
 
-  const handleSave = useCallback(async () => {
-    if (!currentEntry || isSaving) {
+      const didFlush = await flushEntry("date-change");
+      if (!didFlush) {
+        return false;
+      }
+
+      setSelectedDate(date);
+      setViewDate(date);
+      return true;
+    },
+    [flushEntry]
+  );
+
+  const handleContentChange = useCallback(
+    (nextContent: string) => {
+      latestContentRef.current = nextContent;
+      setContent(nextContent);
+      setStatus(
+        nextContent === lastPersistedContentRef.current ? getBaseStatus(currentEntry) : "pending"
+      );
+    },
+    [currentEntry]
+  );
+
+  const handleEntriesScroll = useCallback(
+    (event: UIEvent<HTMLDivElement>) => {
+      const element = event.currentTarget;
+
+      if (element.scrollTop <= ENTRY_SCROLL_THRESHOLD && entryWindow.start > 0) {
+        pendingPrependScrollHeightRef.current = element.scrollHeight;
+        setEntryWindow(current =>
+          expandVisibleEntryWindow(current, "forward", ENTRY_WINDOW_CHUNK, normalizedEntries.length)
+        );
+        return;
+      }
+
+      if (
+        element.scrollHeight - element.scrollTop - element.clientHeight <= ENTRY_SCROLL_THRESHOLD &&
+        entryWindow.end < normalizedEntries.length
+      ) {
+        setEntryWindow(current =>
+          expandVisibleEntryWindow(
+            current,
+            "backward",
+            ENTRY_WINDOW_CHUNK,
+            normalizedEntries.length
+          )
+        );
+      }
+    },
+    [entryWindow.end, entryWindow.start, normalizedEntries.length]
+  );
+
+  useEffect(() => {
+    if (content === lastPersistedContentRef.current) {
+      clearAutosaveTimer();
       return;
     }
 
-    setError(null);
-    setIsSaving(true);
-    setStatus("保存中");
-    try {
-      const saved = await worklogApi.saveEntry(selectedDate, content);
-      setCurrentEntry(saved);
-      await refreshEntries();
-      setStatus("已保存");
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-      setStatus("保存失败");
-    } finally {
-      setIsSaving(false);
-    }
-  }, [content, currentEntry, isSaving, refreshEntries, selectedDate]);
+    clearAutosaveTimer();
+    autosaveTimerRef.current = window.setTimeout(() => {
+      void flushEntry("autosave");
+    }, AUTOSAVE_DELAY_MS);
+
+    return clearAutosaveTimer;
+  }, [clearAutosaveTimer, content, flushEntry, selectedDate]);
 
   const moveDate = (amount: number) => {
-    const next = shiftDate(selectedDate, amount);
-    setSelectedDate(next);
-    setViewDate(next);
+    const next = shiftDate(selectedDateRef.current, amount);
+    void handleSelectDate(next);
   };
 
-  const handleCalendarSelect = (date?: Date) => {
+  const handleCalendarSelect = async (date?: Date) => {
     if (!date) {
       return;
     }
 
-    handleSelectDate(format(date, "yyyy-MM-dd"));
-    setDatePickerOpen(false);
+    const didChange = await handleSelectDate(format(date, "yyyy-MM-dd"));
+    if (didChange) {
+      setDatePickerOpen(false);
+    }
   };
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        void handleSave();
+        void flushEntry("shortcut");
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "p") {
         event.preventDefault();
-        setMode((value) => (value === "edit" ? "preview" : "edit"));
+        setMode(value => (value === "edit" ? "preview" : "edit"));
       }
       if (isSettingsShortcut(event)) {
         event.preventDefault();
@@ -230,151 +472,173 @@ function WorklogApp() {
       }
       if (isToggleSidebarShortcut(event)) {
         event.preventDefault();
-        setSidebarOpen((open) => !open);
+        setSidebarOpen(open => !open);
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleSave]);
+  }, [flushEntry]);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      void flushEntry("window-close");
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [flushEntry]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+      return;
+    }
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    getCurrentWindow()
+      .onCloseRequested(async event => {
+        const didFlush = await flushEntry("window-close");
+        if (!didFlush) {
+          event.preventDefault();
+        }
+      })
+      .then(cleanup => {
+        if (disposed) {
+          cleanup();
+          return;
+        }
+        unlisten = cleanup;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [flushEntry]);
 
   return (
-    <div className="app-shell">
-      {!sidebarOpen && (
-        <button
-          className="sidebar-toggle-floating"
-          type="button"
-          aria-label="展开侧栏"
-          title="展开侧栏"
-          onClick={() => setSidebarOpen(true)}
-        >
-          <PanelLeft size={18} />
-        </button>
-      )}
+    <div className='app-shell'>
+      <button
+        className='sidebar-toggle-floating'
+        data-reveal-visible={String(!sidebarOpen)}
+        type='button'
+        aria-label='展开侧栏'
+        title='展开侧栏'
+        onClick={() => setSidebarOpen(true)}
+      >
+        <PanelLeft size={18} />
+      </button>
 
-      <aside className={cn("sidebar", !sidebarOpen && "sidebar-collapsed")}>
-        <div
-          className="sidebar-titlebar"
-          data-tauri-drag-region
-          onMouseDown={handleWindowDrag}
-        >
+      <aside className='sidebar' data-sidebar-state={sidebarOpen ? "open" : "closed"}>
+        <div className='sidebar-titlebar' data-tauri-drag-region onMouseDown={handleWindowDrag}>
           <button
-            className="icon-button ghost"
-            type="button"
-            aria-label="折叠侧栏"
-            title="折叠侧栏"
+            className='icon-button ghost'
+            type='button'
+            aria-label='折叠侧栏'
+            title='折叠侧栏'
             onClick={() => setSidebarOpen(false)}
           >
             <PanelLeftClose size={18} />
           </button>
           <button
-            className="icon-button ghost"
-            type="button"
-            aria-label="设置"
-            title="设置"
+            className='icon-button ghost'
+            type='button'
+            aria-label='设置'
+            title='设置'
             onClick={() => void worklogApi.openSettings()}
           >
             <Settings size={17} />
           </button>
         </div>
 
-        <div className={cn("sidebar-body", !sidebarOpen && "sidebar-body-hidden")}>
-          <section className="calendar-panel" aria-label="月历">
-              <div className="month-toolbar">
-                <h2>{formatMonthLabel(viewDate)}</h2>
-                <div className="month-actions">
-                  <button
-                    className="icon-button ghost"
-                    type="button"
-                    aria-label="上个月"
-                    onClick={() => setViewDate((date) => shiftMonth(date, -1))}
-                  >
-                    <ChevronLeft size={20} />
-                  </button>
-                  <button
-                    className="today-dot"
-                    type="button"
-                    aria-label="今天"
-                    onClick={() => handleSelectDate(todayIso())}
-                  >
-                    <Circle size={11} fill="currentColor" />
-                  </button>
-                  <button
-                    className="icon-button ghost"
-                    type="button"
-                    aria-label="下个月"
-                    onClick={() => setViewDate((date) => shiftMonth(date, 1))}
-                  >
-                    <ChevronRight size={20} />
-                  </button>
-                </div>
+        <div className='sidebar-body'>
+          <section className='calendar-panel' aria-label='月历'>
+            <div className='month-toolbar'>
+              <h2>{formatMonthLabel(viewDate)}</h2>
+              <div className='month-actions'>
+                <button
+                  className='icon-button ghost'
+                  type='button'
+                  aria-label='上个月'
+                  onClick={() => setViewDate(date => shiftMonth(date, -1))}
+                >
+                  <ChevronLeft size={20} />
+                </button>
+                <button
+                  className='today-dot'
+                  type='button'
+                  aria-label='今天'
+                  onClick={() => void handleSelectDate(todayIso())}
+                >
+                  <Circle size={11} fill='currentColor' />
+                </button>
+                <button
+                  className='icon-button ghost'
+                  type='button'
+                  aria-label='下个月'
+                  onClick={() => setViewDate(date => shiftMonth(date, 1))}
+                >
+                  <ChevronRight size={20} />
+                </button>
               </div>
+            </div>
 
-              <div className="week-grid" aria-hidden="true">
-                {weekLabels.map((label) => (
-                  <span key={label}>{label}</span>
-                ))}
-              </div>
+            <div className='week-grid' aria-hidden='true'>
+              {weekLabels.map(label => (
+                <span key={label}>{label}</span>
+              ))}
+            </div>
 
-              <div className="day-grid">
-                {calendarDays.map((day) => (
-                  <button
-                    className={cn(
-                      "day-cell",
-                      !day.isCurrentMonth && "muted",
-                      day.hasEntry && "has-entry",
-                      day.date === selectedDate && "selected",
-                      day.isToday && day.date !== selectedDate && "today",
-                    )}
-                    key={day.date}
-                    type="button"
-                    aria-label={day.date}
-                    onClick={() => handleSelectDate(day.date)}
-                  >
-                    <span>{day.day}</span>
-                  </button>
-                ))}
-              </div>
-            </section>
+            <div className='day-grid'>
+              {calendarDays.map(day => (
+                <button
+                  className={cn(
+                    "day-cell",
+                    !day.isCurrentMonth && "muted",
+                    day.hasEntry && "has-entry",
+                    day.date === selectedDate && "selected",
+                    day.isToday && day.date !== selectedDate && "today"
+                  )}
+                  key={day.date}
+                  type='button'
+                  aria-label={day.date}
+                  onClick={() => void handleSelectDate(day.date)}
+                >
+                  <span>{day.day}</span>
+                </button>
+              ))}
+            </div>
+          </section>
 
-            <section className="entry-list" aria-label="最近日记">
-              <div className="entry-list-header">
-                <span>最近</span>
-              </div>
-
-              <div className="entries-scroll">
-                {normalizedEntries.slice(0, 8).map((entry) => (
-                  <EntryCard
-                    entry={entry}
-                    isSelected={entry.date === selectedDate}
-                    key={entry.date}
-                    onSelect={() => handleSelectDate(entry.date)}
-                  />
-                ))}
-              </div>
-            </section>
+          <section className='entry-list' aria-label='日期列表'>
+            <div className='entries-scroll' onScroll={handleEntriesScroll} ref={entriesScrollRef}>
+              {visibleEntries.length === 0 && <p className='entry-list-empty'>暂无记录</p>}
+              {visibleEntries.map(entry => (
+                <EntryCard
+                  entry={entry}
+                  isSelected={entry.date === selectedDate}
+                  key={entry.date}
+                  onSelect={() => void handleSelectDate(entry.date)}
+                />
+              ))}
+            </div>
+          </section>
         </div>
       </aside>
 
-      <main className="main-surface">
-        <div
-          className="main-titlebar"
-          data-tauri-drag-region
-          onMouseDown={handleWindowDrag}
-        />
+      <main className='main-surface' data-sidebar-state={sidebarOpen ? "open" : "closed"}>
+        <div className='main-titlebar' data-tauri-drag-region onMouseDown={handleWindowDrag} />
 
-        <section className="editor-wrap">
-          <header className="entry-header">
+        <section className='editor-wrap'>
+          <header className='entry-header'>
             <div>
-              <h1 className="entry-date-title">
+              <h1 className='entry-date-title'>
                 {dateTitleParts.relativeLabel ? (
                   <>
-                    <span
-                      className={cn(
-                        "entry-title-relative",
-                        dateTitleParts.isToday && "today",
-                      )}
-                    >
+                    <span className={cn("entry-title-relative", dateTitleParts.isToday && "today")}>
                       {dateTitleParts.relativeLabel}
                     </span>
                     {`, ${dateTitleParts.dateLabel}`}
@@ -383,29 +647,25 @@ function WorklogApp() {
                   dateTitleParts.dateLabel
                 )}
               </h1>
-              <div className="date-controls">
+              <div className='date-controls'>
                 <button
-                  className="date-control-button"
-                  type="button"
-                  aria-label="前一天"
+                  className='date-control-button'
+                  type='button'
+                  aria-label='前一天'
                   onClick={() => moveDate(-1)}
                 >
                   <ChevronLeft size={16} />
                 </button>
                 <Popover open={datePickerOpen} onOpenChange={setDatePickerOpen}>
                   <PopoverTrigger asChild>
-                    <button
-                      className="date-picker-trigger"
-                      type="button"
-                      aria-label="选择日期"
-                    >
-                      <CalendarDays size={14} aria-hidden="true" />
+                    <button className='date-picker-trigger' type='button' aria-label='选择日期'>
+                      <CalendarDays size={14} aria-hidden='true' />
                       <span>{formatFullDate(selectedDate)}</span>
                     </button>
                   </PopoverTrigger>
-                  <PopoverContent className="date-picker-popover" align="start">
+                  <PopoverContent className='date-picker-popover' align='start'>
                     <Calendar
-                      mode="single"
+                      mode='single'
                       selected={selectedDateValue}
                       defaultMonth={selectedDateValue}
                       showOutsideDays
@@ -415,9 +675,9 @@ function WorklogApp() {
                   </PopoverContent>
                 </Popover>
                 <button
-                  className="date-control-button"
-                  type="button"
-                  aria-label="后一天"
+                  className='date-control-button'
+                  type='button'
+                  aria-label='后一天'
                   onClick={() => moveDate(1)}
                 >
                   <ChevronRight size={16} />
@@ -425,78 +685,68 @@ function WorklogApp() {
               </div>
             </div>
 
-            <div className="editor-actions">
-              <div className="mode-switch" role="tablist" aria-label="编辑模式">
+            <div className='editor-actions'>
+              <div className='mode-switch' role='tablist' aria-label='编辑模式'>
                 <button
                   className={cn(mode === "edit" && "active")}
-                  type="button"
-                  role="tab"
-                  aria-label="编辑"
+                  type='button'
+                  role='tab'
+                  aria-label='编辑'
                   aria-selected={mode === "edit"}
-                  title="编辑"
+                  title='编辑'
                   onClick={() => setMode("edit")}
                 >
                   <Pencil size={15} />
                 </button>
                 <button
                   className={cn(mode === "preview" && "active")}
-                  type="button"
-                  role="tab"
-                  aria-label="预览"
+                  type='button'
+                  role='tab'
+                  aria-label='预览'
                   aria-selected={mode === "preview"}
-                  title="预览"
+                  title='预览'
                   onClick={() => setMode("preview")}
                 >
                   <Eye size={15} />
                 </button>
               </div>
-              <button
-                className={cn("save-button", hasUnsavedChanges && "dirty")}
-                type="button"
-                disabled={!hasUnsavedChanges || isSaving}
-                aria-label="保存日记"
-                onClick={() => void handleSave()}
-              >
-                <Save size={16} />
-                {isSaving ? "保存中" : "保存"}
-              </button>
             </div>
           </header>
 
-          <div className="editor-divider" />
+          <div className='editor-divider' />
 
-          {!currentEntry?.exists && (
-            <div className="empty-ribbon">
-              <Sparkles size={16} />
-              <span>这一天还没有日记</span>
-              <button type="button" onClick={() => void handleCreate(selectedDate)}>
-                创建
-              </button>
-            </div>
-          )}
+          {error && <div className='error-ribbon'>{error}</div>}
 
-          {error && <div className="error-ribbon">{error}</div>}
-
-          <div className="editor-stage">
+          <div className='editor-stage'>
             {mode === "edit" ? (
               <textarea
-                aria-label="Markdown 日记"
+                aria-label='Markdown 日记'
                 value={content}
                 spellCheck={false}
-                onChange={(event) => setContent(event.target.value)}
-                placeholder={createDailyTemplate(selectedDate)}
+                onChange={event => handleContentChange(event.target.value)}
               />
             ) : (
-              <article className="markdown-preview">
+              <article className='markdown-preview'>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
               </article>
             )}
           </div>
         </section>
 
-        <div className="status-line">
-          <span>{status}</span>
-          {selectedEntry?.preview && <span>{selectedEntry.preview}</span>}
+        <div className='status-line' role='status' aria-live='polite'>
+          {statusIndicator?.kind === "spinner" ? (
+            <LoaderCircle
+              className='status-indicator status-indicator-spinning'
+              size={12}
+              aria-label={statusIndicator.label}
+            />
+          ) : statusIndicator?.kind === "warning" ? (
+            <CircleAlert
+              className='status-indicator status-indicator-failed'
+              size={12}
+              aria-label={statusIndicator.label}
+            />
+          ) : null}
         </div>
       </main>
     </div>
@@ -506,7 +756,7 @@ function WorklogApp() {
 function EntryCard({
   entry,
   isSelected,
-  onSelect,
+  onSelect
 }: {
   entry: WorklogEntry;
   isSelected: boolean;
@@ -515,7 +765,7 @@ function EntryCard({
   return (
     <button
       className={cn("entry-card", isSelected && "selected")}
-      type="button"
+      type='button'
       aria-current={isSelected ? "date" : undefined}
       aria-label={`${entry.title} ${entry.preview}`}
       onClick={onSelect}
@@ -542,91 +792,27 @@ function SettingsWindow() {
   }, []);
 
   return (
-    <main className="settings-window">
-      <header
-        className="settings-titlebar"
-        data-tauri-drag-region
-        onMouseDown={handleWindowDrag}
-      >
-        <div>
-          <h1>设置</h1>
-          <p>Worklog 偏好设置与应用信息</p>
-        </div>
-        <span className="settings-header-badge">
-          <Settings size={15} />
-          {appInfo.name}
-        </span>
+    <main className='settings-window'>
+      <header className='settings-titlebar' data-tauri-drag-region onMouseDown={handleWindowDrag}>
+        <h1>设置</h1>
+        <span className='settings-version'>v0.1.1</span>
       </header>
 
-      <div className="settings-content">
-        <section className="settings-panel" aria-labelledby="settings-storage-title">
-          <div className="settings-panel-heading">
-            <span className="settings-icon">
-              <FolderOpen size={18} />
-            </span>
-            <div>
-              <h2 id="settings-storage-title">存储位置</h2>
-              <p>daily 文件夹</p>
-            </div>
-          </div>
-          <span className="settings-badge">本地</span>
-        </section>
+      <div className='settings-content'>
+        <section className='settings-about' aria-labelledby='settings-about-title'>
+          <h2 id='settings-about-title'>{appInfo.name}</h2>
+          <p className='settings-desc'>Markdown 日记 · 本地存储</p>
 
-        <section className="settings-panel" aria-labelledby="settings-editor-title">
-          <div className="settings-panel-heading">
-            <span className="settings-icon">
-              <BookOpen size={18} />
-            </span>
-            <div>
-              <h2 id="settings-editor-title">编辑器</h2>
-              <p>Markdown</p>
-            </div>
-          </div>
-          <span className="settings-badge">预览</span>
-        </section>
-
-        <section
-          className="settings-panel settings-about-panel"
-          aria-labelledby="settings-about-title"
-        >
-          <div className="settings-panel-heading">
-            <span className="settings-icon">
-              <Info size={18} />
-            </span>
-            <div>
-              <h2 id="settings-about-title">应用 About</h2>
-              <p>{appInfo.name} 0.1.1</p>
-            </div>
-          </div>
-
-          <div className="settings-info-grid">
-            <div className="settings-info-item">
-              <UserRound size={16} />
-              <span>作者</span>
-              <strong>{appInfo.author}</strong>
-            </div>
-            <div className="settings-info-item">
-              <Mail size={16} />
-              <span>邮箱</span>
-              <strong>{appInfo.email}</strong>
-            </div>
-            <div className="settings-info-item wide">
-              <Fingerprint size={16} />
-              <span>Identifier</span>
-              <strong>{appInfo.identifier}</strong>
-            </div>
+          <div className='settings-about-info'>
+            <span>作者</span>
+            <strong>{appInfo.author}</strong>
+            <span>邮箱</span>
+            <a href={`mailto:${appInfo.email}`}>{appInfo.email}</a>
+            <span>ID</span>
+            <code>{appInfo.identifier}</code>
           </div>
         </section>
       </div>
-
-      <footer className="settings-footer">
-        <span>我的信息</span>
-        <strong>{appInfo.author}</strong>
-        <a href={`mailto:${appInfo.email}`}>
-          <Mail size={14} />
-          {appInfo.email}
-        </a>
-      </footer>
     </main>
   );
 }
