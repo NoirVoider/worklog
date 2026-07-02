@@ -1,5 +1,6 @@
 import {
   addDays,
+  addMonths,
   differenceInCalendarDays,
   eachDayOfInterval,
   endOfMonth,
@@ -51,10 +52,7 @@ export function shiftDate(date: string, amount: number): string {
 }
 
 export function shiftMonth(date: string, amount: number): string {
-  const parsed = parseISO(date);
-  const next = new Date(parsed);
-  next.setMonth(parsed.getMonth() + amount);
-  return format(next, DATE_FORMAT);
+  return format(addMonths(parseISO(date), amount), DATE_FORMAT);
 }
 
 export function formatMonthLabel(date: string): string {

@@ -7,6 +7,7 @@ import {
   formatDateTitleParts,
   formatMonthLabel,
   normalizeEntries,
+  shiftMonth,
 } from "./worklog";
 
 describe("worklog date helpers", () => {
@@ -35,6 +36,11 @@ describe("worklog date helpers", () => {
       dateLabel: "7月3日 周五",
       isToday: false,
     });
+  });
+
+  it("shifts end-of-month dates into the requested month", () => {
+    expect(shiftMonth("2026-01-31", 1)).toBe("2026-02-28");
+    expect(shiftMonth("2026-03-31", -1)).toBe("2026-02-28");
   });
 
   it("builds a Monday-first 6-week calendar grid with entry markers", () => {

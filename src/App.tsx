@@ -595,7 +595,7 @@ function SettingsWindow() {
             </span>
             <div>
               <h2 id="settings-about-title">应用 About</h2>
-              <p>{appInfo.name} 0.1.0</p>
+              <p>{appInfo.name} 0.1.1</p>
             </div>
           </div>
 

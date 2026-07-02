@@ -7,6 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
+import { worklogApi } from "./lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -39,6 +40,8 @@ describe("sidebar presentation", () => {
   });
 
   it("uses a bordered day state instead of entry dots and keeps the recent header static", async () => {
+    await worklogApi.createEntry("2026-06-24");
+
     await act(async () => {
       root.render(<App />);
     });
@@ -133,6 +136,19 @@ describe("sidebar styling", () => {
     expect(styles).not.toMatch(/mask-image:/);
     expect(styles).not.toMatch(/-webkit-mask-image:/);
     expect(styles).not.toMatch(/-webkit-line-clamp/);
+  });
+
+  it("keeps the sidebar material stable while opening and resizing the window", () => {
+    const sidebarRule = styles.match(/\.sidebar\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+    const collapsedRule = styles.match(/\.sidebar-collapsed\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+
+    expect(sidebarRule).not.toMatch(/linear-gradient/);
+    expect(sidebarRule).not.toMatch(/backdrop-filter/);
+    expect(sidebarRule).not.toMatch(/-webkit-backdrop-filter/);
+    expect(sidebarRule).not.toMatch(/background\s+160ms/);
+    expect(sidebarRule).not.toMatch(/box-shadow\s+160ms/);
+    expect(sidebarRule).not.toMatch(/border-right\s+160ms/);
+    expect(collapsedRule).not.toMatch(/background:\s*transparent;/);
   });
 });
 
@@ -279,13 +295,13 @@ describe("html boot styling", () => {
   const html = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
   const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
 
-  it("uses the app boot background before and after the main stylesheet loads", () => {
+  it("keeps the root surface transparent so native macOS material can show through", () => {
     expect(html).toMatch(/html,\s*body,\s*#root/);
-    expect(html).toMatch(/--app-boot-bg:\s*#f8f9fa;/);
+    expect(html).toMatch(/--app-boot-bg:\s*transparent;/);
     expect(html).toMatch(/background:\s*var\(--app-boot-bg\);/);
-    expect(styles).toMatch(/--app-boot-bg:\s*#f8f9fa;/);
+    expect(styles).toMatch(/--app-boot-bg:\s*transparent;/);
     expect(styles).toMatch(/body\s*\{[\s\S]*background:\s*var\(--app-boot-bg\);/);
     expect(styles).toMatch(/\.app-shell\s*\{[\s\S]*background:\s*var\(--app-boot-bg\);/);
-    expect(html).not.toMatch(/background:\s*transparent;/);
+    expect(styles).toMatch(/\.main-surface\s*\{[\s\S]*background:\s*#fbfcfd;/);
   });
 });

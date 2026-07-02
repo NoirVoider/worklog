@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 :root {
-  --app-boot-bg: #f8f9fa;
+  --app-boot-bg: transparent;
   --accent:       #007AFF;
   --accent-bg:    rgba(0, 122, 255, 0.08);
   --accent-solid: #0066CC;
@@ -90,21 +90,15 @@ textarea:focus-visible,
   overflow: hidden;
   z-index: 2;
   border-right: 1px solid rgba(76, 84, 94, 0.1);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(228, 236, 244, 0.04)),
-    rgba(244, 248, 252, 0.08);
+  background: rgba(246, 248, 251, 0.36);
   box-shadow:
     inset -1px 0 rgba(255, 255, 255, 0.24),
     inset 1px 0 rgba(255, 255, 255, 0.14);
-  backdrop-filter: blur(64px) saturate(210%) brightness(1.04);
-  -webkit-backdrop-filter: blur(64px) saturate(210%) brightness(1.04);
+  contain: paint;
   will-change: width;
   transition:
     width 160ms ease,
-    min-width 160ms ease,
-    background 160ms ease,
-    box-shadow 160ms ease,
-    border-right 160ms ease;
+    min-width 160ms ease;
 }
 
 .sidebar-collapsed {
@@ -112,16 +106,9 @@ textarea:focus-visible,
   min-width: 0;
   overflow: hidden;
   border-right: 0;
-  background: transparent;
-  box-shadow: none;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
   transition:
     width 160ms ease,
-    min-width 160ms ease,
-    background 160ms ease,
-    box-shadow 160ms ease,
-    border-right 160ms ease;
+    min-width 160ms ease;
 }
 
 .sidebar-titlebar {

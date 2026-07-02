@@ -270,16 +270,6 @@ fn apply_native_material(window: &WebviewWindow) -> tauri::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn daily_template_is_blank() {
-        assert_eq!(daily_template("2026-07-02"), "");
-    }
-}
-
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -310,4 +300,14 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running worklog");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daily_template_is_blank() {
+        assert_eq!(daily_template("2026-07-02"), "");
+    }
 }
