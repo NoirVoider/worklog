@@ -728,6 +728,22 @@ describe("status indicator styling", () => {
   });
 });
 
+describe("editor styling", () => {
+  const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+
+  it("normalizes the textarea box model for Safari caret rendering", () => {
+    const editorTextareaRule =
+      styles.match(/\.editor-stage textarea\s*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+
+    expect(editorTextareaRule).toMatch(/display:\s*block;/);
+    expect(editorTextareaRule).toMatch(/margin:\s*0;/);
+    expect(editorTextareaRule).toMatch(/padding:\s*0;/);
+    expect(editorTextareaRule).toMatch(/appearance:\s*none;/);
+    expect(editorTextareaRule).toMatch(/-webkit-appearance:\s*none;/);
+    expect(editorTextareaRule).toMatch(/line-height:\s*1\.78;/);
+  });
+});
+
 describe("settings window", () => {
   const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
   const appSource = readFileSync(resolve(process.cwd(), "src/App.tsx"), "utf8");

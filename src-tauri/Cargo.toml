@@ -1,6 +1,6 @@
 [package]
 name = "worklog"
-version = "0.1.1"
+version = "0.1.2"
 description = "A native-feeling macOS Markdown worklog app"
 authors = ["ttb <x.ttb@icloud.com>"]
 edition = "2021"
